@@ -1,0 +1,20 @@
+# Core data
+pandas>=2.1.0
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
+
+# PDF extraction
+pdfplumber>=0.10.0
+PyMuPDF>=1.23.0          # fitz — page-to-image for LLM fallback
+Pillow>=10.0.0           # PIL.Image
+
+# LLM — Claude (MVP 2+)
+anthropic>=0.40.0
+
+# Utilities
+python-dotenv>=1.0.0
+python-dateutil>=2.8.2
+tqdm>=4.66.0
+
+# PDF generation — packet output (MVP 2+)
+reportlab>=4.0.0

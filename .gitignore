@@ -1,0 +1,34 @@
+# Environment / secrets
+.env
+
+# Data (raw PDFs and source files — too large / sensitive for repo)
+data/bank_raw/
+data/pid_raw/
+data/interim/
+raw_data/
+
+# Output reports (generated artifacts)
+output/reconciled.xlsx
+output/unmatched.xlsx
+output/packets/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude internal
+.claude/

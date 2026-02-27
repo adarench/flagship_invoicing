@@ -1,0 +1,241 @@
+from __future__ import annotations
+#!/usr/bin/env python3
+"""
+run_pipeline.py — Invoice Reconciliation Pipeline entry point.
+
+Usage:
+    python run_pipeline.py                            # run all stages
+    python run_pipeline.py --stage parse_pid
+    python run_pipeline.py --stage parse_banks
+    python run_pipeline.py --stage match
+    python run_pipeline.py --stage report
+
+    python run_pipeline.py --pid data/pid_raw/PID.xlsx --banks data/bank_raw/
+
+Stages (MVP 1 — active):
+    1. parse_pid         → data/interim/pid.csv
+    2. parse_banks       → data/interim/bank_<BANK>.csv
+    3. harmonize         → unified DataFrames (in-memory)
+    4. match             → deterministic match results
+    5. report            → output/reconciled.xlsx, output/unmatched.xlsx
+
+Stages (MVP 2 — scaffolded, raises NotImplementedError):
+    6. fuzzy_match       → LLM vendor canonicalization (Claude Haiku)
+    7. llm_parse_fallback → LLM PDF extraction for banks pdfplumber can't parse
+
+Stages (MVP 3 — scaffolded, raises NotImplementedError):
+    8. packet_reasoning  → LLM audit explanation per matched record (Claude Sonnet)
+"""
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
+
+from config import DATA_PID_RAW, DATA_BANK_RAW, OUTPUT_DIR, LOG_DIR
+from src.ingest.parse_pid         import run as parse_pid_run
+from src.ingest.parse_bank_pdf    import run as parse_banks_run
+from match.harmonize_records      import load_and_harmonize
+from match.deterministic          import run_matching
+from match.fuzzy_llm              import add_canonical_vendor_column
+from output.reconciliation_report import generate_report
+
+
+# ─── Logging Setup ────────────────────────────────────────────────────────────
+
+def setup_logging(level: str = "INFO") -> logging.Logger:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = LOG_DIR / "pipeline.log"
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_file),
+        ],
+    )
+    return logging.getLogger(__name__)
+
+
+# ─── Directory Bootstrap ──────────────────────────────────────────────────────
+
+def ensure_dirs():
+    from config import DATA_PID_RAW, DATA_BANK_RAW, DATA_INTERIM, OUTPUT_DIR, PACKETS_DIR, LOG_DIR
+    for d in [DATA_PID_RAW, DATA_BANK_RAW, DATA_INTERIM, OUTPUT_DIR, PACKETS_DIR, LOG_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+# ─── Stage Runners ────────────────────────────────────────────────────────────
+
+def stage_parse_pid(args, logger):
+    logger.info("=" * 60)
+    logger.info("STAGE 1 — Parse PID")
+    pid_path = Path(args.pid) if args.pid else None
+    df = parse_pid_run(pid_path)
+    logger.info(f"PID parse complete: {len(df)} records")
+    return df
+
+
+def stage_parse_banks(args, logger):
+    logger.info("=" * 60)
+    logger.info("STAGE 2 — Parse Bank PDFs")
+    bank_dir = Path(args.banks) if args.banks else DATA_BANK_RAW
+    results = parse_banks_run(bank_dir)
+    total = sum(len(df) for df in results.values())
+    logger.info(f"Bank parse complete: {total} transactions across {len(results)} banks")
+    return results
+
+
+def stage_harmonize(logger):
+    logger.info("=" * 60)
+    logger.info("STAGE 3 — Harmonize Records")
+    pid_df, bank_df = load_and_harmonize()
+    logger.info(f"PID: {len(pid_df)} rows | Bank: {len(bank_df)} rows")
+    return pid_df, bank_df
+
+
+def stage_canonicalize(pid_df, bank_df, logger):
+    logger.info("=" * 60)
+    logger.info("STAGE 3b — Fuzzy Vendor Canonicalization (Claude Haiku)")
+    bank_df = add_canonical_vendor_column(bank_df, pid_df)
+    matched = (bank_df["canonical_vendor"].fillna("").str.strip() != "").sum()
+    logger.info(f"  Bank rows with a canonical_vendor: {matched}/{len(bank_df)}")
+    return bank_df
+
+
+def stage_match(pid_df, bank_df, logger):
+    logger.info("=" * 60)
+    logger.info("STAGE 4 — Deterministic Matching")
+    match_df = run_matching(pid_df, bank_df)
+    counts = match_df["match_type"].value_counts().to_dict()
+    for t, n in counts.items():
+        logger.info(f"  {t}: {n}")
+    return match_df
+
+
+def stage_report(pid_df, bank_df, match_df, logger):
+    logger.info("=" * 60)
+    logger.info("STAGE 5 — Generate Reports")
+    reconciled_path, unmatched_path = generate_report(pid_df, bank_df, match_df)
+    logger.info(f"  reconciled → {reconciled_path}")
+    logger.info(f"  unmatched  → {unmatched_path}")
+    return reconciled_path, unmatched_path
+
+
+def stage_fuzzy_match(pid_df, bank_df, match_df, logger):
+    """MVP 2 — LLM vendor canonicalization via Claude Haiku. Not yet implemented."""
+    logger.info("=" * 60)
+    logger.info("STAGE 6 — Fuzzy Vendor Matching (MVP 2)")
+    from match.fuzzy_llm import batch_canonicalize  # noqa: F401
+    raise NotImplementedError(
+        "fuzzy_match stage: implement in MVP 2. "
+        "See match/fuzzy_llm.py for the scaffold."
+    )
+
+
+def stage_llm_parse_fallback(args, logger):
+    """MVP 2 — LLM PDF extraction for banks pdfplumber couldn't parse. Not yet implemented."""
+    logger.info("=" * 60)
+    logger.info("STAGE 7 — LLM PDF Parse Fallback (MVP 2)")
+    from src.ingest.llm_pdf_fallback import extract_pdf_with_llm  # noqa: F401
+    raise NotImplementedError(
+        "llm_parse_fallback stage: implement in MVP 2. "
+        "See src/ingest/llm_pdf_fallback.py for the scaffold."
+    )
+
+
+def stage_packet_reasoning(pid_df, bank_df, match_df, logger):
+    """MVP 3 — LLM audit reasoning per matched record. Not yet implemented."""
+    logger.info("=" * 60)
+    logger.info("STAGE 8 — Packet Reasoning (MVP 3)")
+    from output.packet_reasoning_llm import batch_generate_reasoning  # noqa: F401
+    raise NotImplementedError(
+        "packet_reasoning stage: implement in MVP 3. "
+        "See output/packet_reasoning_llm.py for the scaffold."
+    )
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Invoice Reconciliation Pipeline"
+    )
+    parser.add_argument(
+        "--pid",
+        type=str,
+        default=None,
+        help="Path to PID file (.xlsx or .csv) — default: first file in data/pid_raw/",
+    )
+    parser.add_argument(
+        "--banks",
+        type=str,
+        default=None,
+        help="Path to bank PDFs directory (default: data/bank_raw/)",
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        choices=[
+            "parse_pid", "parse_banks", "harmonize", "match", "report", "all",
+            # MVP 2+ (scaffolded — raise NotImplementedError)
+            "fuzzy_match", "llm_parse_fallback", "packet_reasoning",
+        ],
+        default="all",
+        help="Run a specific stage (default: all)",
+    )
+    parser.add_argument("--log-level", type=str, default="INFO")
+    args = parser.parse_args()
+
+    logger = setup_logging(level=args.log_level)
+    ensure_dirs()
+
+    logger.info("Invoice Reconciliation Pipeline — START")
+    logger.info(f"Stage: {args.stage}")
+
+    try:
+        if args.stage in ("parse_pid", "all"):
+            stage_parse_pid(args, logger)
+
+        if args.stage in ("parse_banks", "all"):
+            stage_parse_banks(args, logger)
+
+        if args.stage in ("harmonize", "match", "report", "fuzzy_match", "packet_reasoning", "all"):
+            pid_df, bank_df = stage_harmonize(logger)
+
+            # Always run vendor canonicalization before matching (idempotent — uses cache)
+            if args.stage in ("match", "report", "fuzzy_match", "packet_reasoning", "all"):
+                bank_df = stage_canonicalize(pid_df, bank_df, logger)
+
+            if args.stage in ("match", "report", "fuzzy_match", "packet_reasoning", "all"):
+                match_df = stage_match(pid_df, bank_df, logger)
+
+                if args.stage in ("report", "all"):
+                    stage_report(pid_df, bank_df, match_df, logger)
+
+                if args.stage == "fuzzy_match":
+                    stage_fuzzy_match(pid_df, bank_df, match_df, logger)
+
+                if args.stage == "packet_reasoning":
+                    stage_packet_reasoning(pid_df, bank_df, match_df, logger)
+
+        if args.stage == "llm_parse_fallback":
+            stage_llm_parse_fallback(args, logger)
+
+        logger.info("=" * 60)
+        logger.info("Pipeline complete.")
+
+    except FileNotFoundError as e:
+        logger.error(f"Missing required file: {e}")
+        logger.error("Drop data into data/pid_raw/ and data/bank_raw/, then re-run.")
+        sys.exit(1)
+    except Exception as e:
+        logger.exception(f"Pipeline failed: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
