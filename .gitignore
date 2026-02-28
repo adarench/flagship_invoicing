@@ -32,3 +32,11 @@ build/
 
 # Claude internal
 .claude/
+
+# Web app
+web/.next/
+web/node_modules/
+web/.env.local
+
+# Job artifact storage
+storage/

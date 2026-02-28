@@ -166,13 +166,35 @@ def _clean_check_no(val) -> str:
     return s.strip()
 
 
+def _parse_sheet_skip_empty_header(xl: pd.ExcelFile, sheet: str) -> pd.DataFrame:
+    """
+    Parse one Excel sheet, skipping empty leading rows to find the real header.
+    Uses the same density heuristic as _read_csv_skip_empty_header.
+    """
+    raw = xl.parse(sheet, header=None, dtype=str)
+    header_row_idx = None
+    for i, row in raw.iterrows():
+        non_empty = [c for c in row if c and str(c).strip().lower() not in ("nan", "none", "")]
+        if len(non_empty) >= max(3, len(row) * 0.3):
+            header_row_idx = i
+            break
+    if header_row_idx is None:
+        return pd.DataFrame()
+    headers = [str(c).strip() for c in raw.iloc[header_row_idx]]
+    data_df = raw.iloc[header_row_idx + 1:].copy()
+    data_df.columns = headers
+    data_df = data_df.reset_index(drop=True)
+    logger.info(f"Excel header detected at row {header_row_idx} in sheet '{sheet}': {headers}")
+    return data_df
+
+
 def _pick_best_sheet(xl: pd.ExcelFile) -> pd.DataFrame:
-    """Return the sheet with the most data rows."""
+    """Return the sheet with the most data rows, with empty-leading-row detection."""
     best_df = pd.DataFrame()
     best_name = None
     for sheet in xl.sheet_names:
         try:
-            df = xl.parse(sheet, header=0)
+            df = _parse_sheet_skip_empty_header(xl, sheet)
             if len(df) > len(best_df):
                 best_df = df
                 best_name = sheet

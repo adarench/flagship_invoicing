@@ -18,3 +18,9 @@ tqdm>=4.66.0
 
 # PDF generation — packet output (MVP 2+)
 reportlab>=4.0.0
+
+# Web API (MVP web portal)
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+aiofiles>=23.2.0
