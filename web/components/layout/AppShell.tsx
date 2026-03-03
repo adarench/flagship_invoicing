@@ -11,7 +11,7 @@ export function AppShell({ children, jobId }: AppShellProps) {
     <>
       <Navbar />
       <Sidebar jobId={jobId} />
-      <main className="ml-56 mt-14 min-h-[calc(100vh-3.5rem)] bg-gray-50 p-6">
+      <main className="mt-14 min-h-[calc(100vh-3.5rem)] bg-gray-50 p-4 md:ml-56 md:p-6">
         {children}
       </main>
     </>

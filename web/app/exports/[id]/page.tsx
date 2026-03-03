@@ -46,6 +46,13 @@ export default function ExportsPage() {
       icon: FileJson,
       color: 'text-purple-500',
     },
+    {
+      label: 'Packet Manifest',
+      description: 'Generated packet index and metadata for this job.',
+      filename: 'packet_manifest.json',
+      icon: FileJson,
+      color: 'text-indigo-500',
+    },
   ]
 
   return (

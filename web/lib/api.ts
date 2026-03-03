@@ -10,6 +10,7 @@ import type {
   MatchDetail,
   ApproveRejectResponse,
   PacketGenerateResponse,
+  PdfSourcesResponse,
 } from './types'
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || ''
@@ -116,6 +117,10 @@ export function packetsZipUrl(id: string): string {
 
 export function pdfPageUrl(id: string, filename: string, page: number): string {
   return `${BASE}/api/jobs/${id}/pdf/${encodeURIComponent(filename)}?page=${page}`
+}
+
+export async function getPdfSources(id: string): Promise<PdfSourcesResponse> {
+  return request<PdfSourcesResponse>(`/api/jobs/${id}/pdf_sources`)
 }
 
 export async function getJobLog(id: string): Promise<string> {

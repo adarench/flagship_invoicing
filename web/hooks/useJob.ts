@@ -1,6 +1,6 @@
 'use client'
 import { useQuery } from '@tanstack/react-query'
-import { getJobStatus, getJobHistory } from '@/lib/api'
+import { getJobStatus, getJobHistory, getJobSummary, getCoverage, getPdfSources } from '@/lib/api'
 
 export function useJobStatus(jobId: string | null, enabled = true) {
   return useQuery({
@@ -17,7 +17,6 @@ export function useJobStatus(jobId: string | null, enabled = true) {
 }
 
 export function useJobSummary(jobId: string | null) {
-  const { getJobSummary } = require('@/lib/api')
   return useQuery({
     queryKey: ['job', jobId, 'summary'],
     queryFn: () => getJobSummary(jobId!),
@@ -27,7 +26,6 @@ export function useJobSummary(jobId: string | null) {
 }
 
 export function useJobCoverage(jobId: string | null) {
-  const { getCoverage } = require('@/lib/api')
   return useQuery({
     queryKey: ['job', jobId, 'coverage'],
     queryFn: () => getCoverage(jobId!),
@@ -41,5 +39,14 @@ export function useJobHistory() {
     queryKey: ['jobs', 'history'],
     queryFn: getJobHistory,
     staleTime: 10_000,
+  })
+}
+
+export function useJobPdfSources(jobId: string | null) {
+  return useQuery({
+    queryKey: ['job', jobId, 'pdf_sources'],
+    queryFn: () => getPdfSources(jobId!),
+    enabled: !!jobId,
+    staleTime: 30_000,
   })
 }

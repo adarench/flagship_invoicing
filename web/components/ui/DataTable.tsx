@@ -11,7 +11,7 @@ export interface Column<T> {
   className?: string
 }
 
-interface DataTableProps<T extends Record<string, unknown>> {
+interface DataTableProps<T extends object> {
   columns: Column<T>[]
   data: T[]
   onRowClick?: (row: T) => void
@@ -19,7 +19,7 @@ interface DataTableProps<T extends Record<string, unknown>> {
   className?: string
 }
 
-export function DataTable<T extends Record<string, unknown>>({
+export function DataTable<T extends object>({
   columns,
   data,
   onRowClick,
@@ -40,10 +40,24 @@ export function DataTable<T extends Record<string, unknown>>({
 
   const sorted = [...data].sort((a, b) => {
     if (!sortKey) return 0
-    const av = a[sortKey]
-    const bv = b[sortKey]
+    const av = (a as Record<string, unknown>)[sortKey]
+    const bv = (b as Record<string, unknown>)[sortKey]
     if (av === bv) return 0
-    const cmp = String(av ?? '') < String(bv ?? '') ? -1 : 1
+    const asNum = Number(av)
+    const bsNum = Number(bv)
+    if (!Number.isNaN(asNum) && !Number.isNaN(bsNum)) {
+      const cmpNum = asNum < bsNum ? -1 : 1
+      return sortDir === 'asc' ? cmpNum : -cmpNum
+    }
+
+    const asDate = new Date(String(av ?? '')).getTime()
+    const bsDate = new Date(String(bv ?? '')).getTime()
+    if (!Number.isNaN(asDate) && !Number.isNaN(bsDate)) {
+      const cmpDate = asDate < bsDate ? -1 : 1
+      return sortDir === 'asc' ? cmpDate : -cmpDate
+    }
+
+    const cmp = String(av ?? '').localeCompare(String(bv ?? ''), undefined, { sensitivity: 'base' })
     return sortDir === 'asc' ? cmp : -cmp
   })
 
@@ -91,7 +105,7 @@ export function DataTable<T extends Record<string, unknown>>({
               >
                 {columns.map(col => (
                   <td key={String(col.key)} className={cn('px-4 py-3 text-gray-700', col.className)}>
-                    {col.render ? col.render(row) : String(row[col.key as keyof T] ?? '')}
+                    {col.render ? col.render(row) : String((row as Record<string, unknown>)[String(col.key)] ?? '')}
                   </td>
                 ))}
               </tr>

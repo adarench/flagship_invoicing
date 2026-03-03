@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { FileText, Download, Loader2 } from 'lucide-react'
+import { FileText, Download } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import { MatchTypeBadge } from '@/components/ui/MatchTypeBadge'
@@ -17,12 +17,16 @@ interface PacketCardProps {
 export function PacketCard({ item, jobId }: PacketCardProps) {
   const [packetUrl, setPacketUrl] = useState<string | null>(null)
   const [generating, setGenerating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleGenerate() {
     setGenerating(true)
+    setError(null)
     try {
       const res = await generatePacket(jobId, item.match_id)
       setPacketUrl(res.packet_url)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to generate packet')
     } finally {
       setGenerating(false)
     }
@@ -53,6 +57,7 @@ export function PacketCard({ item, jobId }: PacketCardProps) {
               Generate Packet
             </Button>
           )}
+          {error && <p className="text-right text-xs text-red-600">{error}</p>}
         </div>
       </div>
     </Card>

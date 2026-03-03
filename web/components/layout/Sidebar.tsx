@@ -26,7 +26,7 @@ export function Sidebar({ jobId }: SidebarProps) {
   ]
 
   return (
-    <aside className="fixed left-0 top-14 bottom-0 w-56 border-r border-gray-200 bg-white px-3 py-4">
+    <aside className="fixed left-0 top-14 bottom-0 hidden w-56 border-r border-gray-200 bg-white px-3 py-4 md:block">
       <nav className="space-y-0.5">
         {globalLinks.map(({ href, label, icon: Icon }) => (
           <Link

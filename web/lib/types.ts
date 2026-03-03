@@ -1,7 +1,13 @@
 // lib/types.ts — TypeScript interfaces matching Pydantic models
 
 export interface StepStatus {
-  step_name: string
+  step_name:
+    | 'parse_pid'
+    | 'parse_banks'
+    | 'canonicalize_vendors'
+    | 'match'
+    | 'report'
+    | 'build_artifacts'
   status: 'pending' | 'running' | 'done' | 'error'
 }
 
@@ -17,7 +23,7 @@ export interface JobStatus {
 
 export interface JobHistory {
   job_id: string
-  state: string
+  state: 'pending' | 'running' | 'completed' | 'error'
   created_at: string
   updated_at: string
   error_message?: string | null
@@ -106,11 +112,21 @@ export interface MatchDetail extends ReviewItem {
 
 export interface ApproveRejectResponse {
   match_id: string
-  status: string
+  status: ReviewStatus
   message: string
 }
 
 export interface PacketGenerateResponse {
   match_id: string
   packet_url: string
+}
+
+export interface PdfSource {
+  filename: string
+  page_count: number
+}
+
+export interface PdfSourcesResponse {
+  job_id: string
+  sources: PdfSource[]
 }

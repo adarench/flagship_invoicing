@@ -15,13 +15,17 @@ interface ApprovalButtonsProps {
 export function ApprovalButtons({ jobId, matchId, currentStatus, onStatusChange }: ApprovalButtonsProps) {
   const [status, setStatus] = useState<ReviewStatus>(currentStatus)
   const [loading, setLoading] = useState<'approve' | 'reject' | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleApprove() {
     setLoading('approve')
+    setError(null)
     try {
       await approveMatch(jobId, matchId)
       setStatus('approved')
       onStatusChange?.('approved')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to approve')
     } finally {
       setLoading(null)
     }
@@ -29,10 +33,13 @@ export function ApprovalButtons({ jobId, matchId, currentStatus, onStatusChange 
 
   async function handleReject() {
     setLoading('reject')
+    setError(null)
     try {
       await rejectMatch(jobId, matchId)
       setStatus('rejected')
       onStatusChange?.('rejected')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to reject')
     } finally {
       setLoading(null)
     }
@@ -55,25 +62,28 @@ export function ApprovalButtons({ jobId, matchId, currentStatus, onStatusChange 
   }
 
   return (
-    <div className="flex gap-2">
-      <Button
-        variant="success"
-        size="md"
-        loading={loading === 'approve'}
-        onClick={handleApprove}
-      >
-        <Check className="h-4 w-4" />
-        Approve
-      </Button>
-      <Button
-        variant="danger"
-        size="md"
-        loading={loading === 'reject'}
-        onClick={handleReject}
-      >
-        <X className="h-4 w-4" />
-        Reject
-      </Button>
+    <div>
+      <div className="flex gap-2">
+        <Button
+          variant="success"
+          size="md"
+          loading={loading === 'approve'}
+          onClick={handleApprove}
+        >
+          <Check className="h-4 w-4" />
+          Approve
+        </Button>
+        <Button
+          variant="danger"
+          size="md"
+          loading={loading === 'reject'}
+          onClick={handleReject}
+        >
+          <X className="h-4 w-4" />
+          Reject
+        </Button>
+      </div>
+      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
     </div>
   )
 }

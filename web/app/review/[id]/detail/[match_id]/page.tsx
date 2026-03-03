@@ -11,6 +11,7 @@ import { PDFViewer } from '@/components/ui/PDFViewer'
 import Button from '@/components/ui/Button'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useMatchDetail } from '@/hooks/useMatchDetail'
+import { useJobPdfSources } from '@/hooks/useJob'
 
 export default function MatchDetailPage() {
   const params = useParams<{ id: string; match_id: string }>()
@@ -18,7 +19,10 @@ export default function MatchDetailPage() {
   const matchId = decodeURIComponent(params.match_id)
 
   const { data: match, isLoading, error } = useMatchDetail(jobId, matchId)
+  const { data: pdfSources } = useJobPdfSources(jobId)
   const [pdfOpen, setPdfOpen] = useState(false)
+  const [pdfIndex, setPdfIndex] = useState(0)
+  const selectedPdf = pdfSources?.sources?.[pdfIndex]
 
   return (
     <AppShell jobId={jobId}>
@@ -35,7 +39,12 @@ export default function MatchDetailPage() {
             <p className="mt-0.5 font-mono text-xs text-gray-400">{matchId}</p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={() => setPdfOpen(true)}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setPdfOpen(true)}
+              disabled={!selectedPdf}
+            >
               <FileText className="h-4 w-4" /> View PDF
             </Button>
             {match && (
@@ -62,7 +71,31 @@ export default function MatchDetailPage() {
 
       {/* PDF Viewer Modal */}
       <Modal open={pdfOpen} onClose={() => setPdfOpen(false)} title="Bank Statement PDF" size="xl">
-        <PDFViewer jobId={jobId} filename="bank_FLAG.pdf" totalPages={210} />
+        {pdfSources?.sources && pdfSources.sources.length > 1 && (
+          <div className="mb-3">
+            <label className="text-xs font-medium text-gray-500">Source PDF</label>
+            <select
+              className="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm"
+              value={pdfIndex}
+              onChange={(e) => setPdfIndex(Number(e.target.value))}
+            >
+              {pdfSources.sources.map((src, idx) => (
+                <option key={src.filename} value={idx}>
+                  {src.filename} ({src.page_count} pages)
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {selectedPdf ? (
+          <PDFViewer
+            jobId={jobId}
+            filename={selectedPdf.filename}
+            totalPages={selectedPdf.page_count}
+          />
+        ) : (
+          <p className="text-sm text-gray-500">No bank PDF source found for this job.</p>
+        )}
       </Modal>
     </AppShell>
   )
