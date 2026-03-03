@@ -46,6 +46,9 @@ Three match tiers, in priority order:
 ### Stage 5 — Report
 Generates `reconciled.xlsx` and `unmatched.xlsx`.
 
+### Stage 6 — Packet Reasoning (MVP 3)
+Generates cached audit reasoning text for matched records (`output/packet_reasoning.json`).
+
 ---
 
 ## Setup
@@ -80,6 +83,9 @@ python run_pipeline.py --stage parse_pid
 python run_pipeline.py --stage parse_banks
 python run_pipeline.py --stage match
 python run_pipeline.py --stage report
+python run_pipeline.py --stage fuzzy_match
+python run_pipeline.py --stage llm_parse_fallback
+python run_pipeline.py --stage packet_reasoning
 
 # Point to specific files
 python run_pipeline.py --pid path/to/PID.xlsx --banks path/to/bank_pdfs/
@@ -107,8 +113,11 @@ python run_pipeline.py --pid path/to/PID.xlsx --banks path/to/bank_pdfs/
 │
 ├── output/
 │   ├── reconciliation_report.py     # Excel report generation
-│   ├── generate_packet.py           # Per-record audit packet (MVP 3)
-│   └── packet_reasoning_llm.py      # LLM audit reasoning scaffold (MVP 3)
+│   ├── generate_packet.py           # 3-page per-record PDF packet generation
+│   └── packet_reasoning_llm.py      # LLM audit reasoning + cache
+│
+├── api/                             # FastAPI backend
+└── web/                             # Next.js portal
 │
 └── data/                            # Excluded from repo (add locally)
     ├── pid_raw/
@@ -131,4 +140,17 @@ python run_pipeline.py --pid path/to/PID.xlsx --banks path/to/bank_pdfs/
 | — Secondary (date + amount) | 2 |
 | Unmatched | 665 |
 
-Match rate will increase significantly when AG, WDCPL, and GPM bank statements are added.
+Match rate will increase as AG, WDCPL, and GPM statements are added and coverage improves.
+
+---
+
+## Local Services
+
+```bash
+# Backend API
+uvicorn api.main:app --reload --port 8000
+
+# Frontend portal
+cd web
+npm run dev
+```
