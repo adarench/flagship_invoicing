@@ -50,6 +50,24 @@ def _build_table(rows: list[list[str]], col_widths: list[float]):
     return table
 
 
+def _to_amount(value) -> float:
+    """Coerce CSV/JSON amount fields to float safely."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        return 0.0
+    s = s.replace("$", "").replace(",", "")
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 def generate_packet(
     pid_row: dict,
     bank_rows: list[dict],
@@ -96,7 +114,7 @@ def generate_packet(
         ["Vendor", str(pid_row.get("vendor", ""))],
         ["Invoice #", str(pid_row.get("invoice_no", ""))],
         ["Invoice Date", str(pid_row.get("invoice_date", ""))],
-        ["PID Amount", f"${float(abs(pid_row.get('amount', 0) or 0)):.2f}"],
+        ["PID Amount", f"${abs(_to_amount(pid_row.get('amount', 0))):.2f}"],
         ["Check #", str(pid_row.get("check_no", ""))],
         ["Check Date", str(pid_row.get("check_date", ""))],
         ["Bank", str(pid_row.get("bank", ""))],
@@ -121,7 +139,7 @@ def generate_packet(
                 str(row.get("bank_id", "")),
                 str(row.get("posted_date", "")),
                 str(row.get("check_no", "")),
-                f"${float(abs(row.get('amount', 0) or 0)):.2f}",
+                f"${abs(_to_amount(row.get('amount', 0))):.2f}",
                 str(row.get("description", ""))[:120],
             ]
         )

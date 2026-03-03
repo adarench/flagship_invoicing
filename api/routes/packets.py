@@ -23,26 +23,35 @@ from output.packet_reasoning_llm import generate_reasoning
 router = APIRouter()
 
 
+def _packet_error(code: int, message: str, match_id: str | None = None, stage: str | None = None) -> HTTPException:
+    detail = {"error": message}
+    if match_id is not None:
+        detail["match_id"] = match_id
+    if stage is not None:
+        detail["stage"] = stage
+    return HTTPException(status_code=code, detail=detail)
+
+
 def _match_item(job_id: str, match_id: str) -> dict:
     try:
         queue = storage.read_json(job_id, "review_queue.json")
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Review queue not found") from exc
+        raise _packet_error(404, "Review queue not found", match_id=match_id, stage="queue") from exc
     item = next((i for i in queue.get("items", []) if i["match_id"] == match_id), None)
     if not item:
-        raise HTTPException(status_code=404, detail=f"Match {match_id!r} not found")
+        raise _packet_error(404, f"Match {match_id!r} not found", match_id=match_id, stage="queue")
     return item
 
 
 def _load_pid_row(job_id: str, pid_id: str) -> dict:
     pid_path = storage.artifact_path(job_id, "pid.csv")
     if not pid_path.exists():
-        raise HTTPException(status_code=404, detail="PID artifact not found for this job")
+        raise _packet_error(404, "PID artifact not found for this job", stage="pid_artifact")
 
     pid_df = pd.read_csv(pid_path, dtype=str).fillna("")
     row_df = pid_df[pid_df["pid_id"] == pid_id]
     if row_df.empty:
-        raise HTTPException(status_code=404, detail=f"PID row {pid_id!r} not found")
+        raise _packet_error(404, f"PID row {pid_id!r} not found", stage="pid_lookup")
     return row_df.iloc[0].to_dict()
 
 
@@ -93,45 +102,52 @@ def _write_manifest(job_id: str, manifest: dict) -> None:
 @router.post("/{job_id}/match/{match_id}/packet", response_model=PacketGenerateResponse)
 async def generate_packet(job_id: str, match_id: str):
     item = _match_item(job_id, match_id)
+    try:
+        pid_id = str(item.get("pid_id", ""))
+        pid_row = _load_pid_row(job_id, pid_id)
+        bank_rows = _load_bank_rows(job_id, item.get("bank_id"))
 
-    pid_id = str(item.get("pid_id", ""))
-    pid_row = _load_pid_row(job_id, pid_id)
-    bank_rows = _load_bank_rows(job_id, item.get("bank_id"))
+        reasoning = generate_reasoning(
+            pid_row=pid_row,
+            bank_rows=bank_rows,
+            match_type=str(item.get("match_type", "")),
+            match_confidence=float(item.get("match_confidence", 0) or 0),
+            notes=str(item.get("notes", "")),
+            cache_path=storage.artifact_path(job_id, "packet_reasoning_cache.json"),
+        )
 
-    reasoning = generate_reasoning(
-        pid_row=pid_row,
-        bank_rows=bank_rows,
-        match_type=str(item.get("match_type", "")),
-        match_confidence=float(item.get("match_confidence", 0) or 0),
-        notes=str(item.get("notes", "")),
-        cache_path=storage.artifact_path(job_id, "packet_reasoning_cache.json"),
-    )
-
-    packet_seed = f"packet_{match_id.replace(':', '_').replace('+', '_')}"
-    pdf_path = generate_packet_pdf(
-        pid_row=pid_row,
-        bank_rows=bank_rows,
-        reasoning=reasoning,
-        output_dir=storage.packets_dir(job_id),
-        match_meta=item,
-        packet_basename=packet_seed,
-    )
+        packet_seed = f"packet_{match_id.replace(':', '_').replace('+', '_')}"
+        pdf_path = generate_packet_pdf(
+            pid_row=pid_row,
+            bank_rows=bank_rows,
+            reasoning=reasoning,
+            output_dir=storage.packets_dir(job_id),
+            match_meta=item,
+            packet_basename=packet_seed,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _packet_error(500, f"Packet generation failed: {exc}", match_id=match_id, stage="packet_generate") from exc
 
     packet_url = f"/api/jobs/{job_id}/exports/packets/{pdf_path.name}"
 
-    manifest = _read_manifest(job_id)
-    packets = [p for p in manifest.get("packets", []) if p.get("match_id") != match_id]
-    packets.append(
-        {
-            "match_id": match_id,
-            "filename": pdf_path.name,
-            "url": packet_url,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "status": "generated",
-        }
-    )
-    manifest["packets"] = packets
-    _write_manifest(job_id, manifest)
+    try:
+        manifest = _read_manifest(job_id)
+        packets = [p for p in manifest.get("packets", []) if p.get("match_id") != match_id]
+        packets.append(
+            {
+                "match_id": match_id,
+                "filename": pdf_path.name,
+                "url": packet_url,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "status": "generated",
+            }
+        )
+        manifest["packets"] = packets
+        _write_manifest(job_id, manifest)
+    except Exception as exc:
+        raise _packet_error(500, f"Packet manifest update failed: {exc}", match_id=match_id, stage="manifest") from exc
 
     return PacketGenerateResponse(match_id=match_id, packet_url=packet_url)
 
