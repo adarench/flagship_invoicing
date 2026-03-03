@@ -319,10 +319,13 @@ def save_pid(df: pd.DataFrame, output_path: Path | None = None) -> Path:
     return output_path
 
 
-def run(pid_path: Path | None = None) -> pd.DataFrame:
-    """Parse PID file (xlsx or csv) and save to data/interim/pid.csv."""
+def run(
+    pid_path: Path | None = None,
+    output_path: Path | None = None,
+) -> pd.DataFrame:
+    """Parse PID file (xlsx or csv) and save to pid.csv."""
     df = parse_pid(pid_path)
-    save_pid(df)
+    save_pid(df, output_path=output_path)
     return df
 
 

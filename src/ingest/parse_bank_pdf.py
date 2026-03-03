@@ -435,14 +435,17 @@ def extract_with_text_regex(
 
 # ─── Main PDF Parser ──────────────────────────────────────────────────────────
 
-def parse_bank_pdf(pdf_path: Path) -> pd.DataFrame:
+def parse_bank_pdf(
+    pdf_path: Path,
+    return_meta: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """
     Parse a single bank statement PDF → normalized DataFrame.
 
     Extraction strategy (in order):
       1. pdfplumber table extraction (works for digitally-generated PDFs)
       2. pdfplumber text + regex (works for Northern Trust check register layout)
-      3. LLM fallback — TODO in MVP 2
+      3. LLM fallback for scanned check-face pages
     """
     bank, statement_month = parse_filename(pdf_path)
     logger.info(f"─── {pdf_path.name}")
@@ -496,9 +499,20 @@ def parse_bank_pdf(pdf_path: Path) -> pd.DataFrame:
         logger.warning(
             f"    All extraction strategies found no transactions in {pdf_path.name}."
         )
-        return pd.DataFrame(
+        empty_df = pd.DataFrame(
             columns=["bank_id", "posted_date", "check_no", "amount", "description", "statement_month"]
         )
+        if return_meta:
+            return empty_df, {
+                "filename": pdf_path.name,
+                "bank": bank,
+                "statement_month": statement_month,
+                "rows_extracted": 0,
+                "strategy": "none",
+                "regex_stats": stats,
+                "llm_stats": llm_stats,
+            }
+        return empty_df
 
     df = pd.DataFrame(records)
     # Keep canonical columns; extra columns (e.g. source) are preserved as-is
@@ -510,12 +524,27 @@ def parse_bank_pdf(pdf_path: Path) -> pd.DataFrame:
         f"(regex: {len(df) - llm_stats.get('new_records', 0)}, "
         f"llm_new: {llm_stats.get('new_records', 0)})"
     )
+    meta = {
+        "filename": pdf_path.name,
+        "bank": bank,
+        "statement_month": statement_month,
+        "rows_extracted": len(df),
+        "strategy": "tables" if stats == {} else "regex_plus_llm",
+        "regex_stats": stats,
+        "llm_stats": llm_stats,
+    }
+    if return_meta:
+        return df, meta
     return df
 
 
 # ─── Batch Runner ─────────────────────────────────────────────────────────────
 
-def run(bank_raw_dir: Path | None = None) -> dict[str, pd.DataFrame]:
+def run(
+    bank_raw_dir: Path | None = None,
+    interim_dir: Path | None = None,
+    return_metadata: bool = False,
+) -> dict[str, pd.DataFrame] | tuple[dict[str, pd.DataFrame], dict]:
     """
     Parse all PDFs in data/bank_raw/.
     Groups by bank, saves data/interim/bank_<BANK>.csv.
@@ -523,16 +552,24 @@ def run(bank_raw_dir: Path | None = None) -> dict[str, pd.DataFrame]:
     """
     if bank_raw_dir is None:
         bank_raw_dir = DATA_BANK_RAW
+    if interim_dir is None:
+        interim_dir = DATA_INTERIM
 
     pdfs = sorted(bank_raw_dir.glob("*.pdf"))
     if not pdfs:
         logger.warning(f"No PDF files found in {bank_raw_dir}")
-        return {}
+        empty: dict[str, pd.DataFrame] = {}
+        if return_metadata:
+            return empty, {"files": [], "total_files": 0}
+        return empty
 
     bank_frames: dict[str, list[pd.DataFrame]] = {}
+    parse_meta: list[dict] = []
     for pdf_path in pdfs:
         bank, _ = parse_filename(pdf_path)
-        df = parse_bank_pdf(pdf_path)
+        parsed = parse_bank_pdf(pdf_path, return_meta=True)
+        df, meta = parsed
+        parse_meta.append(meta)
         if not df.empty:
             bank_frames.setdefault(bank, []).append(df)
 
@@ -540,18 +577,23 @@ def run(bank_raw_dir: Path | None = None) -> dict[str, pd.DataFrame]:
     for bank, dfs in bank_frames.items():
         combined = pd.concat(dfs, ignore_index=True)
         combined = combined.sort_values("posted_date").reset_index(drop=True)
-        output_path = DATA_INTERIM / f"bank_{bank}.csv"
+        output_path = interim_dir / f"bank_{bank}.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         combined.to_csv(output_path, index=False)
         logger.info(f"Saved {len(combined)} transactions → {output_path}")
         result[bank] = combined
 
+    if return_metadata:
+        return result, {
+            "files": parse_meta,
+            "total_files": len(parse_meta),
+        }
     return result
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    results = run()
+    results = run(return_metadata=False)
     for bank, df in results.items():
         print(f"\n{bank}: {len(df)} transactions")
         print(df.head(3).to_string())

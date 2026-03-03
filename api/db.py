@@ -63,6 +63,33 @@ def init_db():
         conn.commit()
 
 
+def mark_stale_running_jobs() -> int:
+    """
+    Mark jobs left in a running/pending state from a previous process as error.
+    Returns number of jobs updated.
+    """
+    now = _now()
+    message = "Job interrupted before completion (service restart or crash)"
+    with _lock, _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT job_id FROM jobs WHERE state IN ('running', 'pending')"
+        ).fetchall()
+        job_ids = [r["job_id"] for r in rows]
+        if not job_ids:
+            return 0
+
+        conn.executemany(
+            "UPDATE jobs SET state='error', error_message=?, updated_at=? WHERE job_id=?",
+            [(message, now, jid) for jid in job_ids],
+        )
+        conn.executemany(
+            "UPDATE steps SET status='error' WHERE job_id=? AND status='running'",
+            [(jid,) for jid in job_ids],
+        )
+        conn.commit()
+        return len(job_ids)
+
+
 def create_job(job_id: str) -> None:
     """Insert a new job record and its default steps."""
     now = _now()

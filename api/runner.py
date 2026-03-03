@@ -7,7 +7,6 @@ Runs the full reconciliation pipeline and writes all artifacts to storage/<job_i
 """
 
 import sys
-import json
 import logging
 import threading
 import traceback
@@ -194,6 +193,53 @@ def _build_review_queue(job_id: str, pid_df, bank_df, match_df) -> dict:
     return queue
 
 
+def _build_raw_ocr(job_id: str, bank_df, parse_metadata: dict | None = None) -> dict:
+    parse_metadata = parse_metadata or {}
+    files = parse_metadata.get("files", [])
+
+    llm_rows = []
+    if "source" in bank_df.columns:
+        llm_rows_df = bank_df[bank_df["source"] == "llm_fallback"].copy()
+        for _, row in llm_rows_df.iterrows():
+            llm_rows.append({
+                "bank_id": str(row.get("bank_id", "")),
+                "posted_date": str(row.get("posted_date", "")),
+                "check_no": str(row.get("check_no", "")),
+                "amount": float(row.get("amount", 0) or 0),
+                "description": str(row.get("description", "")),
+                "statement_month": str(row.get("statement_month", "")),
+                "bank_name": str(row.get("bank_name", "")),
+            })
+
+    total_llm_pages = 0
+    total_llm_new_records = 0
+    total_llm_rows_extracted = 0
+    total_vendor_enriched = 0
+    for fmeta in files:
+        llm = fmeta.get("llm_stats", {}) or {}
+        total_llm_pages += int(llm.get("pages_processed", 0) or 0)
+        total_llm_new_records += int(llm.get("new_records", 0) or 0)
+        total_llm_rows_extracted += int(llm.get("rows_extracted", 0) or 0)
+        total_vendor_enriched += int(llm.get("vendor_matches", 0) or 0)
+
+    artifact = {
+        "job_id": job_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "files": files,
+        "summary": {
+            "total_files": int(parse_metadata.get("total_files", len(files))),
+            "llm_pages_processed": total_llm_pages,
+            "llm_rows_extracted": total_llm_rows_extracted,
+            "llm_new_records": total_llm_new_records,
+            "llm_vendor_enriched": total_vendor_enriched,
+            "llm_records_in_final_bank_df": len(llm_rows),
+        },
+        "llm_fallback_records": llm_rows,
+    }
+    storage.write_json(job_id, "raw_ocr.json", artifact)
+    return artifact
+
+
 # ── Main runner ────────────────────────────────────────────────────────────────
 
 def run_job(job_id: str, pid_path: Path, bank_paths: list[Path]):
@@ -212,17 +258,12 @@ def run_job(job_id: str, pid_path: Path, bank_paths: list[Path]):
         from match.fuzzy_llm           import add_canonical_vendor_column
         from match.deterministic       import run_matching
         from output.reconciliation_report import generate_report
-        import shutil as _shutil
-        import pandas as pd
+        job_interim_dir = jdir
+        bank_parse_metadata: dict = {"files": [], "total_files": 0}
 
         # ── Stage 1: Parse PID ──────────────────────────────────────────────
         def _parse_pid():
-            df = parse_pid_run(pid_path)
-            # Copy generated pid.csv to job storage
-            from config import DATA_INTERIM
-            interim_pid = DATA_INTERIM / "pid.csv"
-            if interim_pid.exists():
-                _shutil.copy2(interim_pid, jdir / "pid.csv")
+            df = parse_pid_run(pid_path, output_path=job_interim_dir / "pid.csv")
             storage.append_log(job_id, f"  → {len(df)} PID records")
             return df
 
@@ -231,24 +272,25 @@ def run_job(job_id: str, pid_path: Path, bank_paths: list[Path]):
 
         # ── Stage 2: Parse Bank PDFs ────────────────────────────────────────
         def _parse_banks():
+            nonlocal bank_parse_metadata
             bank_dir = bank_paths[0].parent if bank_paths else None
-            results = parse_banks_run(bank_dir)
-            from config import DATA_INTERIM
+            results, metadata = parse_banks_run(
+                bank_dir,
+                interim_dir=job_interim_dir,
+                return_metadata=True,
+            )
+            bank_parse_metadata = metadata
             total = 0
             for bank, df in results.items():
-                bank_csv = DATA_INTERIM / f"bank_{bank}.csv"
-                if bank_csv.exists():
-                    _shutil.copy2(bank_csv, jdir / f"bank_{bank}.csv")
                 total += len(df)
             storage.append_log(job_id, f"  → {total} bank transactions across {len(results)} banks")
             return results
 
-        bank_results = _step(job_id, "parse_banks", _parse_banks)
+        _step(job_id, "parse_banks", _parse_banks)
         _advance_progress(job_id, "parse_banks", progress)
 
         # ── Stage 3: Load and harmonize from interim ────────────────────────
-        from config import DATA_INTERIM
-        pid_df, bank_df = load_and_harmonize(DATA_INTERIM)
+        pid_df, bank_df = load_and_harmonize(job_interim_dir)
 
         # ── Stage 3b: Canonicalize vendors ─────────────────────────────────
         def _canonicalize():
@@ -276,8 +318,7 @@ def run_job(job_id: str, pid_path: Path, bank_paths: list[Path]):
             _build_summary(job_id, pid_df, bank_df, match_df)
             _build_coverage(job_id, bank_df)
             _build_review_queue(job_id, pid_df, bank_df, match_df)
-            # Save raw match data as summary reference
-            storage.write_json(job_id, "raw_ocr.json", {"note": "OCR extraction data — see bank CSVs"})
+            _build_raw_ocr(job_id, bank_df, bank_parse_metadata)
 
         _step(job_id, "build_artifacts", _build_artifacts)
         _advance_progress(job_id, "build_artifacts", progress)

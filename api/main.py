@@ -43,7 +43,10 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     db.init_db()
+    recovered = db.mark_stale_running_jobs()
     logger.info("Database initialized")
+    if recovered:
+        logger.warning(f"Marked {recovered} stale running/pending jobs as error")
     # Ensure storage directory exists
     (Path(__file__).parent.parent / "storage").mkdir(parents=True, exist_ok=True)
     logger.info("Flagborough Reconciliation API ready")

@@ -11,12 +11,33 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
 
 from api import db, storage, runner
 from api.models import CreateJobResponse, JobStatus, StepStatus, JobHistory
 
 router = APIRouter()
+
+_PID_EXTS = {".xlsx", ".xls", ".csv"}
+_BANK_EXTS = {".pdf"}
+
+
+def _safe_name(name: str) -> str:
+    # Prevent path traversal and normalize potentially weird upload names.
+    return Path(name or "").name.strip()
+
+
+def _validate_upload_name(name: str, allowed_exts: set[str], role: str) -> str:
+    safe = _safe_name(name)
+    if not safe:
+        raise HTTPException(status_code=400, detail=f"{role} filename is missing")
+    ext = Path(safe).suffix.lower()
+    if ext not in allowed_exts:
+        allowed = ", ".join(sorted(allowed_exts))
+        raise HTTPException(
+            status_code=400,
+            detail=f"{role} must be one of: {allowed}. Got: {safe}",
+        )
+    return safe
 
 
 @router.post("/create", response_model=CreateJobResponse)
@@ -28,38 +49,41 @@ async def create_job(
     Accept uploaded files, save to storage, create a DB job record,
     launch the pipeline in a background thread, return the job_id.
     """
+    if not bank_files:
+        raise HTTPException(status_code=400, detail="At least one bank PDF is required")
+
     job_id = str(uuid.uuid4())
     db.create_job(job_id)
 
     udir = storage.uploads_dir(job_id)
 
     # Save PID file
-    pid_path = udir / pid_file.filename
+    pid_name = _validate_upload_name(pid_file.filename or "", _PID_EXTS, "pid_file")
+    pid_path = udir / pid_name
     pid_path.write_bytes(await pid_file.read())
 
     # Save bank PDFs
     bank_paths: list[Path] = []
+    seen_names: set[str] = set()
     for bf in bank_files:
-        bp = udir / bf.filename
+        bank_name = _validate_upload_name(bf.filename or "", _BANK_EXTS, "bank_file")
+        if bank_name in seen_names:
+            raise HTTPException(status_code=400, detail=f"Duplicate bank filename: {bank_name}")
+        seen_names.add(bank_name)
+        bp = udir / bank_name
         bp.write_bytes(await bf.read())
         bank_paths.append(bp)
 
-    # Seed data directories for the existing pipeline
-    # The runner will copy files into config.DATA_PID_RAW and DATA_BANK_RAW
-    import shutil
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from config import DATA_PID_RAW, DATA_BANK_RAW
-
-    # Clear and repopulate raw data dirs so the pipeline uses these uploads
-    for f in DATA_PID_RAW.glob("*"):
-        f.unlink(missing_ok=True)
-    shutil.copy2(pid_path, DATA_PID_RAW / pid_file.filename)
-
-    for f in DATA_BANK_RAW.glob("*"):
-        f.unlink(missing_ok=True)
-    for bp in bank_paths:
-        shutil.copy2(bp, DATA_BANK_RAW / bp.name)
+    storage.write_json(
+        job_id,
+        "upload_manifest.json",
+        {
+            "job_id": job_id,
+            "pid_file": pid_name,
+            "bank_files": [p.name for p in bank_paths],
+            "total_bank_files": len(bank_paths),
+        },
+    )
 
     runner.launch(job_id, pid_path, bank_paths)
 
