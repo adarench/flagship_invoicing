@@ -19,15 +19,16 @@ Stages (MVP 1 — active):
     4. match             → deterministic match results
     5. report            → output/reconciled.xlsx, output/unmatched.xlsx
 
-Stages (MVP 2 — scaffolded, raises NotImplementedError):
+Stages (MVP 2 — active):
     6. fuzzy_match       → LLM vendor canonicalization (Claude Haiku)
     7. llm_parse_fallback → LLM PDF extraction for banks pdfplumber can't parse
 
-Stages (MVP 3 — scaffolded, raises NotImplementedError):
+Stages (MVP 3 — active):
     8. packet_reasoning  → LLM audit explanation per matched record (Claude Sonnet)
 """
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -41,6 +42,7 @@ from src.ingest.parse_bank_pdf    import run as parse_banks_run
 from match.harmonize_records      import load_and_harmonize
 from match.deterministic          import run_matching
 from match.fuzzy_llm              import add_canonical_vendor_column
+from output.packet_reasoning_llm  import batch_generate_reasoning
 from output.reconciliation_report import generate_report
 
 
@@ -126,36 +128,51 @@ def stage_report(pid_df, bank_df, match_df, logger):
 
 
 def stage_fuzzy_match(pid_df, bank_df, match_df, logger):
-    """MVP 2 — LLM vendor canonicalization via Claude Haiku. Not yet implemented."""
+    """Report fuzzy vendor matching outputs."""
     logger.info("=" * 60)
-    logger.info("STAGE 6 — Fuzzy Vendor Matching (MVP 2)")
-    from match.fuzzy_llm import batch_canonicalize  # noqa: F401
-    raise NotImplementedError(
-        "fuzzy_match stage: implement in MVP 2. "
-        "See match/fuzzy_llm.py for the scaffold."
-    )
+    logger.info("STAGE 6 — Fuzzy Vendor Matching")
+    fuzzy = match_df[match_df["match_type"] == "fuzzy"]
+    logger.info(f"  Fuzzy matches: {len(fuzzy)}")
+    if len(fuzzy) > 0:
+        logger.info("\n" + fuzzy[["pid_id", "bank_id", "match_confidence", "notes"]].head(10).to_string(index=False))
+    return fuzzy
 
 
 def stage_llm_parse_fallback(args, logger):
-    """MVP 2 — LLM PDF extraction for banks pdfplumber couldn't parse. Not yet implemented."""
+    """Run parse stage and summarize LLM fallback extraction stats."""
     logger.info("=" * 60)
-    logger.info("STAGE 7 — LLM PDF Parse Fallback (MVP 2)")
-    from src.ingest.llm_pdf_fallback import extract_pdf_with_llm  # noqa: F401
-    raise NotImplementedError(
-        "llm_parse_fallback stage: implement in MVP 2. "
-        "See src/ingest/llm_pdf_fallback.py for the scaffold."
-    )
+    logger.info("STAGE 7 — LLM PDF Parse Fallback")
+    bank_dir = Path(args.banks) if args.banks else DATA_BANK_RAW
+    _, metadata = parse_banks_run(bank_dir, return_metadata=True)
+    files = metadata.get("files", [])
+    pages = sum(int((f.get("llm_stats", {}) or {}).get("pages_processed", 0) or 0) for f in files)
+    extracted = sum(int((f.get("llm_stats", {}) or {}).get("rows_extracted", 0) or 0) for f in files)
+    new_rows = sum(int((f.get("llm_stats", {}) or {}).get("new_records", 0) or 0) for f in files)
+    logger.info(f"  Files scanned: {metadata.get('total_files', 0)}")
+    logger.info(f"  LLM pages processed: {pages}")
+    logger.info(f"  LLM rows extracted: {extracted}")
+    logger.info(f"  LLM new rows added: {new_rows}")
+    return metadata
 
 
 def stage_packet_reasoning(pid_df, bank_df, match_df, logger):
-    """MVP 3 — LLM audit reasoning per matched record. Not yet implemented."""
+    """Generate and persist LLM audit reasoning for all matched records."""
     logger.info("=" * 60)
-    logger.info("STAGE 8 — Packet Reasoning (MVP 3)")
-    from output.packet_reasoning_llm import batch_generate_reasoning  # noqa: F401
-    raise NotImplementedError(
-        "packet_reasoning stage: implement in MVP 3. "
-        "See output/packet_reasoning_llm.py for the scaffold."
+    logger.info("STAGE 8 — Packet Reasoning")
+    matched_records = [r for r in match_df.to_dict("records") if r.get("match_type") != "unmatched"]
+    pid_idx = {str(r["pid_id"]): r for _, r in pid_df.iterrows()}
+    bank_idx = {str(r["bank_id"]): r for _, r in bank_df.iterrows()}
+    reasoning = batch_generate_reasoning(
+        matched_records=matched_records,
+        pid_df_idx=pid_idx,
+        bank_df_idx=bank_idx,
+        cache_path=OUTPUT_DIR / "packet_reasoning_cache.json",
     )
+    out_path = OUTPUT_DIR / "packet_reasoning.json"
+    out_path.write_text(json.dumps(reasoning, indent=2))
+    logger.info(f"  Generated reasoning entries: {len(reasoning)}")
+    logger.info(f"  reasoning output → {out_path}")
+    return reasoning
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -181,7 +198,7 @@ def main():
         type=str,
         choices=[
             "parse_pid", "parse_banks", "harmonize", "match", "report", "all",
-            # MVP 2+ (scaffolded — raise NotImplementedError)
+            # Optional explicit stages
             "fuzzy_match", "llm_parse_fallback", "packet_reasoning",
         ],
         default="all",

@@ -3,30 +3,43 @@ from __future__ import annotations
 api/models.py — Pydantic request/response models for all API routes.
 """
 
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import List, Optional, Literal
+from pydantic import BaseModel, Field
+
+StepName = Literal[
+    "parse_pid",
+    "parse_banks",
+    "canonicalize_vendors",
+    "match",
+    "report",
+    "build_artifacts",
+]
+StepState = Literal["pending", "running", "done", "error"]
+JobState = Literal["pending", "running", "completed", "error"]
+ReviewStatus = Literal["needs_review", "approved", "rejected"]
+MatchType = Literal["primary", "secondary", "retention", "fuzzy", "unmatched"]
 
 
 # ── Job Models ────────────────────────────────────────────────────────────────
 
 class StepStatus(BaseModel):
-    step_name: str
-    status: str  # pending | running | done | error
+    step_name: StepName
+    status: StepState
 
 
 class JobStatus(BaseModel):
     job_id: str
-    state: str   # pending | running | completed | error
+    state: JobState
     progress: int  # 0–100
     error_message: Optional[str] = None
-    steps: List[StepStatus] = []
+    steps: List[StepStatus] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
 
 class JobHistory(BaseModel):
     job_id: str
-    state: str
+    state: JobState
     created_at: str
     updated_at: str
     error_message: Optional[str] = None
@@ -74,7 +87,7 @@ class CoverageBank(BaseModel):
 
 class Coverage(BaseModel):
     job_id: str
-    banks: List[CoverageBank]
+    banks: List[CoverageBank] = Field(default_factory=list)
 
 
 # ── Review Models ──────────────────────────────────────────────────────────────
@@ -87,10 +100,10 @@ class ReviewItem(BaseModel):
     invoice_no: str
     pid_amount: float
     bank_amount: Optional[float] = None
-    match_type: str
+    match_type: MatchType
     match_confidence: float
     notes: str
-    status: str  # needs_review | approved | rejected
+    status: ReviewStatus
     check_no: str
     check_date: Optional[str] = None
     bank_posted_date: Optional[str] = None
@@ -100,7 +113,7 @@ class ReviewItem(BaseModel):
 
 class ReviewQueue(BaseModel):
     job_id: str
-    items: List[ReviewItem]
+    items: List[ReviewItem] = Field(default_factory=list)
     total: int
     pending: int
     approved: int
@@ -117,10 +130,10 @@ class MatchDetail(BaseModel):
     pid_amount: float
     bank_amount: Optional[float] = None
     amount_diff: Optional[float] = None
-    match_type: str
+    match_type: MatchType
     match_confidence: float
     notes: str
-    status: str
+    status: ReviewStatus
     check_no: str
     check_date: Optional[str] = None
     bank_posted_date: Optional[str] = None
@@ -132,7 +145,7 @@ class MatchDetail(BaseModel):
 
 class ApproveRejectResponse(BaseModel):
     match_id: str
-    status: str
+    status: ReviewStatus
     message: str
 
 
@@ -157,3 +170,13 @@ class ExportLinks(BaseModel):
     unmatched_xlsx: str
     summary_json: str
     raw_ocr_json: Optional[str] = None
+
+
+class PDFSource(BaseModel):
+    filename: str
+    page_count: int
+
+
+class PDFSourcesResponse(BaseModel):
+    job_id: str
+    sources: List[PDFSource] = Field(default_factory=list)

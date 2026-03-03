@@ -11,95 +11,127 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from api import storage
 from api.models import PacketGenerateResponse
+from output.generate_packet import generate_packet as generate_packet_pdf
+from output.packet_reasoning_llm import generate_reasoning
 
 router = APIRouter()
 
 
-def _generate_pdf(job_id: str, match_id: str, item: dict) -> Path:
-    """Create a simple PDF audit packet using reportlab."""
+def _match_item(job_id: str, match_id: str) -> dict:
     try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib import colors
-    except ImportError:
-        raise HTTPException(status_code=500, detail="reportlab not installed")
+        queue = storage.read_json(job_id, "review_queue.json")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Review queue not found") from exc
+    item = next((i for i in queue.get("items", []) if i["match_id"] == match_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Match {match_id!r} not found")
+    return item
 
-    pdir = storage.packets_dir(job_id)
-    safe_id = match_id.replace(":", "_").replace("+", "_")
-    pdf_path = pdir / f"packet_{safe_id}.pdf"
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter)
-    styles = getSampleStyleSheet()
-    story = []
+def _load_pid_row(job_id: str, pid_id: str) -> dict:
+    pid_path = storage.artifact_path(job_id, "pid.csv")
+    if not pid_path.exists():
+        raise HTTPException(status_code=404, detail="PID artifact not found for this job")
 
-    # Title
-    story.append(Paragraph("Reconciliation Audit Packet", styles["Title"]))
-    story.append(Spacer(1, 0.2 * inch))
+    pid_df = pd.read_csv(pid_path, dtype=str).fillna("")
+    row_df = pid_df[pid_df["pid_id"] == pid_id]
+    if row_df.empty:
+        raise HTTPException(status_code=404, detail=f"PID row {pid_id!r} not found")
+    return row_df.iloc[0].to_dict()
 
-    # Meta
-    story.append(Paragraph(f"Job ID: {job_id}", styles["Normal"]))
-    story.append(Paragraph(f"Match ID: {match_id}", styles["Normal"]))
-    story.append(Paragraph(
-        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-        styles["Normal"],
-    ))
-    story.append(Spacer(1, 0.3 * inch))
 
-    # Match data table
-    rows = [
-        ["Field", "Value"],
-        ["Vendor", item.get("vendor", "")],
-        ["Invoice #", item.get("invoice_no", "")],
-        ["PID Amount", f"${float(item.get('pid_amount', 0)):.2f}"],
-        ["Bank Amount", f"${float(item.get('bank_amount', 0) or 0):.2f}"],
-        ["Match Type", item.get("match_type", "")],
-        ["Confidence", f"{float(item.get('match_confidence', 0)) * 100:.0f}%"],
-        ["Check #", item.get("check_no", "")],
-        ["Check Date", str(item.get("check_date", ""))],
-        ["Bank Posted", str(item.get("bank_posted_date", ""))],
-        ["Bank", item.get("bank", "")],
-        ["Notes", item.get("notes", "")],
-        ["Review Status", item.get("status", "")],
-    ]
-    t = Table(rows, colWidths=[2 * inch, 4 * inch])
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2D6CDF")),
-        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.white),
-        ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-    story.append(t)
+def _load_bank_rows(job_id: str, bank_id: str | None) -> list[dict]:
+    if not bank_id:
+        return []
 
-    doc.build(story)
-    pdf_path.write_bytes(buf.getvalue())
-    return pdf_path
+    bank_ids = [s for s in str(bank_id).split("+") if s]
+    if not bank_ids:
+        return []
+
+    bank_files = sorted(storage.job_dir(job_id).glob("bank_*.csv"))
+    if not bank_files:
+        return []
+
+    frames = [pd.read_csv(path).fillna("") for path in bank_files]
+    bank_df = pd.concat(frames, ignore_index=True)
+    idx = bank_df.set_index("bank_id")
+    out = []
+    for bid in bank_ids:
+        if bid in idx.index:
+            row = idx.loc[bid]
+            # If duplicate bank_id exists, use first row deterministically.
+            if hasattr(row, "to_dict"):
+                if isinstance(row, pd.DataFrame):
+                    out.append(row.iloc[0].to_dict())
+                else:
+                    out.append(row.to_dict())
+    return out
+
+
+def _manifest_path(job_id: str) -> Path:
+    return storage.artifact_path(job_id, "packet_manifest.json")
+
+
+def _read_manifest(job_id: str) -> dict:
+    path = _manifest_path(job_id)
+    if path.exists():
+        return storage.read_json(job_id, "packet_manifest.json")
+    return {"job_id": job_id, "generated_at": None, "packets": []}
+
+
+def _write_manifest(job_id: str, manifest: dict) -> None:
+    manifest["generated_at"] = datetime.now(timezone.utc).isoformat()
+    storage.write_json(job_id, "packet_manifest.json", manifest)
 
 
 @router.post("/{job_id}/match/{match_id}/packet", response_model=PacketGenerateResponse)
 async def generate_packet(job_id: str, match_id: str):
-    # Load review item
-    try:
-        data = storage.read_json(job_id, "review_queue.json")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Review queue not found")
+    item = _match_item(job_id, match_id)
 
-    item = next((i for i in data.get("items", []) if i["match_id"] == match_id), None)
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Match {match_id!r} not found")
+    pid_id = str(item.get("pid_id", ""))
+    pid_row = _load_pid_row(job_id, pid_id)
+    bank_rows = _load_bank_rows(job_id, item.get("bank_id"))
 
-    pdf_path = _generate_pdf(job_id, match_id, item)
+    reasoning = generate_reasoning(
+        pid_row=pid_row,
+        bank_rows=bank_rows,
+        match_type=str(item.get("match_type", "")),
+        match_confidence=float(item.get("match_confidence", 0) or 0),
+        notes=str(item.get("notes", "")),
+        cache_path=storage.artifact_path(job_id, "packet_reasoning_cache.json"),
+    )
+
+    packet_seed = f"packet_{match_id.replace(':', '_').replace('+', '_')}"
+    pdf_path = generate_packet_pdf(
+        pid_row=pid_row,
+        bank_rows=bank_rows,
+        reasoning=reasoning,
+        output_dir=storage.packets_dir(job_id),
+        match_meta=item,
+        packet_basename=packet_seed,
+    )
+
     packet_url = f"/api/jobs/{job_id}/exports/packets/{pdf_path.name}"
+
+    manifest = _read_manifest(job_id)
+    packets = [p for p in manifest.get("packets", []) if p.get("match_id") != match_id]
+    packets.append(
+        {
+            "match_id": match_id,
+            "filename": pdf_path.name,
+            "url": packet_url,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "status": "generated",
+        }
+    )
+    manifest["packets"] = packets
+    _write_manifest(job_id, manifest)
 
     return PacketGenerateResponse(match_id=match_id, packet_url=packet_url)
 
@@ -107,7 +139,7 @@ async def generate_packet(job_id: str, match_id: str):
 @router.get("/{job_id}/packets.zip")
 async def download_packets_zip(job_id: str):
     pdir = storage.packets_dir(job_id)
-    pdfs = list(pdir.glob("*.pdf"))
+    pdfs = sorted(pdir.glob("*.pdf"))
     if not pdfs:
         raise HTTPException(status_code=404, detail="No packets generated yet for this job")
 

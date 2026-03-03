@@ -6,6 +6,7 @@ GET /api/jobs/{job_id}/exports/reconciled.xlsx
 GET /api/jobs/{job_id}/exports/unmatched.xlsx
 GET /api/jobs/{job_id}/exports/summary.json
 GET /api/jobs/{job_id}/exports/raw_ocr.json
+GET /api/jobs/{job_id}/exports/packet_manifest.json
 GET /api/jobs/{job_id}/exports/packets/{filename}  — individual PDF packet
 GET /api/jobs/{job_id}/log                          — streaming run log
 GET /api/jobs/{job_id}/pdf/{filename}               — render bank PDF page to PNG
@@ -18,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse
 
 from api import storage
+from api.models import PDFSourcesResponse, PDFSource
 
 router = APIRouter()
 
@@ -64,6 +66,12 @@ async def download_raw_ocr(job_id: str):
     return FileResponse(path, media_type="application/json", filename="raw_ocr.json")
 
 
+@router.get("/{job_id}/exports/packet_manifest.json")
+async def download_packet_manifest(job_id: str):
+    path = _require_file(job_id, "packet_manifest.json")
+    return FileResponse(path, media_type="application/json", filename="packet_manifest.json")
+
+
 @router.get("/{job_id}/exports/packets/{filename}")
 async def download_packet(job_id: str, filename: str):
     path = storage.packets_dir(job_id) / filename
@@ -100,19 +108,46 @@ async def render_pdf_page(
         raise HTTPException(status_code=500, detail="PyMuPDF not installed — cannot render PDF pages")
 
     doc = fitz.open(str(pdf_path))
-    if page >= len(doc):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Page {page} out of range (document has {len(doc)} pages)",
-        )
+    try:
+        if page >= len(doc):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Page {page} out of range (document has {len(doc)} pages)",
+            )
 
-    pg = doc[page]
-    mat = fitz.Matrix(2.0, 2.0)   # 2× scale for legibility
-    pix = pg.get_pixmap(matrix=mat)
-    img_bytes = pix.tobytes("png")
+        pg = doc[page]
+        mat = fitz.Matrix(2.0, 2.0)   # 2× scale for legibility
+        pix = pg.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+    finally:
+        doc.close()
 
     return StreamingResponse(
         io.BytesIO(img_bytes),
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@router.get("/{job_id}/pdf_sources", response_model=PDFSourcesResponse)
+async def list_pdf_sources(job_id: str):
+    upload_dir = storage.uploads_dir(job_id)
+    pdfs = sorted(upload_dir.glob("*.pdf"))
+    sources: list[PDFSource] = []
+
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PyMuPDF not installed")
+
+    for pdf in pdfs:
+        page_count = 0
+        try:
+            doc = fitz.open(str(pdf))
+            page_count = len(doc)
+            doc.close()
+        except Exception:
+            page_count = 0
+        sources.append(PDFSource(filename=pdf.name, page_count=page_count))
+
+    return PDFSourcesResponse(job_id=job_id, sources=sources)
