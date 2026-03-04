@@ -36,7 +36,16 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from config import DATA_PID_RAW, DATA_BANK_RAW, OUTPUT_DIR, LOG_DIR
+from config import (
+    DATA_PID_RAW,
+    DATA_BANK_RAW,
+    OUTPUT_DIR,
+    LOG_DIR,
+    BANK_PARSE_WORKERS,
+    LLM_PAGE_WORKERS,
+    LLM_PAGE_MAX_RETRIES,
+    LLM_PAGE_RETRY_BASE_SECONDS,
+)
 from src.ingest.parse_pid         import run as parse_pid_run
 from src.ingest.parse_bank_pdf    import run as parse_banks_run
 from match.harmonize_records      import load_and_harmonize
@@ -85,7 +94,13 @@ def stage_parse_banks(args, logger):
     logger.info("=" * 60)
     logger.info("STAGE 2 — Parse Bank PDFs")
     bank_dir = Path(args.banks) if args.banks else DATA_BANK_RAW
-    results = parse_banks_run(bank_dir)
+    results = parse_banks_run(
+        bank_dir,
+        workers=args.bank_parse_workers,
+        llm_page_workers=args.llm_page_workers,
+        llm_page_max_retries=args.llm_page_max_retries,
+        llm_page_retry_base_seconds=args.llm_page_retry_base_seconds,
+    )
     total = sum(len(df) for df in results.values())
     logger.info(f"Bank parse complete: {total} transactions across {len(results)} banks")
     return results
@@ -143,7 +158,14 @@ def stage_llm_parse_fallback(args, logger):
     logger.info("=" * 60)
     logger.info("STAGE 7 — LLM PDF Parse Fallback")
     bank_dir = Path(args.banks) if args.banks else DATA_BANK_RAW
-    _, metadata = parse_banks_run(bank_dir, return_metadata=True)
+    _, metadata = parse_banks_run(
+        bank_dir,
+        return_metadata=True,
+        workers=args.bank_parse_workers,
+        llm_page_workers=args.llm_page_workers,
+        llm_page_max_retries=args.llm_page_max_retries,
+        llm_page_retry_base_seconds=args.llm_page_retry_base_seconds,
+    )
     files = metadata.get("files", [])
     pages = sum(int((f.get("llm_stats", {}) or {}).get("pages_processed", 0) or 0) for f in files)
     extracted = sum(int((f.get("llm_stats", {}) or {}).get("rows_extracted", 0) or 0) for f in files)
@@ -205,6 +227,30 @@ def main():
         help="Run a specific stage (default: all)",
     )
     parser.add_argument("--log-level", type=str, default="INFO")
+    parser.add_argument(
+        "--bank-parse-workers",
+        type=int,
+        default=BANK_PARSE_WORKERS,
+        help="Process workers for parsing PDFs in parallel.",
+    )
+    parser.add_argument(
+        "--llm-page-workers",
+        type=int,
+        default=LLM_PAGE_WORKERS,
+        help="In-flight page OCR requests per PDF during LLM fallback.",
+    )
+    parser.add_argument(
+        "--llm-page-max-retries",
+        type=int,
+        default=LLM_PAGE_MAX_RETRIES,
+        help="Retries per page OCR request on transient LLM failures.",
+    )
+    parser.add_argument(
+        "--llm-page-retry-base-seconds",
+        type=float,
+        default=LLM_PAGE_RETRY_BASE_SECONDS,
+        help="Base seconds for linear backoff between LLM page retries.",
+    )
     args = parser.parse_args()
 
     logger = setup_logging(level=args.log_level)
@@ -212,6 +258,13 @@ def main():
 
     logger.info("Invoice Reconciliation Pipeline — START")
     logger.info(f"Stage: {args.stage}")
+    logger.info(
+        "Parse tuning: "
+        f"bank_parse_workers={args.bank_parse_workers}, "
+        f"llm_page_workers={args.llm_page_workers}, "
+        f"llm_page_max_retries={args.llm_page_max_retries}, "
+        f"llm_page_retry_base_seconds={args.llm_page_retry_base_seconds}"
+    )
 
     try:
         if args.stage in ("parse_pid", "all"):

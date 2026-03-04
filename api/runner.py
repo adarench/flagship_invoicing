@@ -17,6 +17,12 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from api import db, storage
+from config import (
+    BANK_PARSE_WORKERS,
+    LLM_PAGE_WORKERS,
+    LLM_PAGE_MAX_RETRIES,
+    LLM_PAGE_RETRY_BASE_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -278,12 +284,25 @@ def run_job(job_id: str, pid_path: Path, bank_paths: list[Path]):
                 bank_dir,
                 interim_dir=job_interim_dir,
                 return_metadata=True,
+                workers=BANK_PARSE_WORKERS,
+                llm_page_workers=LLM_PAGE_WORKERS,
+                llm_page_max_retries=LLM_PAGE_MAX_RETRIES,
+                llm_page_retry_base_seconds=LLM_PAGE_RETRY_BASE_SECONDS,
             )
             bank_parse_metadata = metadata
             total = 0
             for bank, df in results.items():
                 total += len(df)
-            storage.append_log(job_id, f"  → {total} bank transactions across {len(results)} banks")
+            timing = metadata.get("timing", {}) or {}
+            parse_timing = timing.get("total_seconds")
+            pdf_workers = timing.get("pdf_workers", BANK_PARSE_WORKERS)
+            storage.append_log(
+                job_id,
+                "  → "
+                f"{total} bank transactions across {len(results)} banks "
+                f"(pdf_workers={pdf_workers}, llm_page_workers={LLM_PAGE_WORKERS}, "
+                f"seconds={parse_timing})",
+            )
             return results
 
         _step(job_id, "parse_banks", _parse_banks)

@@ -22,14 +22,24 @@ Fallback to Claude (MVP 2+) when pdfplumber yields no transactions.
 import re
 import sys
 import logging
+import time
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pandas as pd
 import pdfplumber
 import fitz  # PyMuPDF — used to detect scanned pages for LLM fallback
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from config import DATA_BANK_RAW, DATA_INTERIM, BANKS
+from config import (
+    DATA_BANK_RAW,
+    DATA_INTERIM,
+    BANKS,
+    BANK_PARSE_WORKERS,
+    LLM_PAGE_WORKERS,
+    LLM_PAGE_MAX_RETRIES,
+    LLM_PAGE_RETRY_BASE_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -435,30 +445,67 @@ def extract_with_text_regex(
 
 # ─── Main PDF Parser ──────────────────────────────────────────────────────────
 
-def parse_bank_pdf(
-    pdf_path: Path,
-    return_meta: bool = False,
-) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
-    """
-    Parse a single bank statement PDF → normalized DataFrame.
+def _sort_bank_frame(df: pd.DataFrame) -> pd.DataFrame:
+    sort_cols = [c for c in ["posted_date", "statement_month", "check_no", "bank_id"] if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, kind="mergesort", na_position="last")
+    return df.reset_index(drop=True)
 
-    Extraction strategy (in order):
-      1. pdfplumber table extraction (works for digitally-generated PDFs)
-      2. pdfplumber text + regex (works for Northern Trust check register layout)
-      3. LLM fallback for scanned check-face pages
+
+def _parse_pdf_worker(
+    pdf_path_str: str,
+    llm_page_workers: int,
+    llm_page_max_retries: int,
+    llm_page_retry_base_seconds: float,
+) -> tuple[str, dict]:
+    """
+    Worker entrypoint for per-PDF raw extraction only.
+    Returns (pdf_path_str, raw_payload).
+    """
+    pdf_path = Path(pdf_path_str)
+    raw_payload = _parse_bank_pdf_raw_payload(
+        pdf_path=pdf_path,
+        llm_page_workers=llm_page_workers,
+        llm_page_max_retries=llm_page_max_retries,
+        llm_page_retry_base_seconds=llm_page_retry_base_seconds,
+    )
+    return pdf_path_str, raw_payload
+
+
+def _parse_bank_pdf_raw_payload(
+    pdf_path: Path,
+    llm_page_workers: int = LLM_PAGE_WORKERS,
+    llm_page_max_retries: int = LLM_PAGE_MAX_RETRIES,
+    llm_page_retry_base_seconds: float = LLM_PAGE_RETRY_BASE_SECONDS,
+) -> dict:
+    """
+    Parse one PDF into deterministic raw components.
+    No LLM merge/enrichment is applied here.
     """
     bank, statement_month = parse_filename(pdf_path)
     logger.info(f"─── {pdf_path.name}")
     logger.info(f"    bank={bank}  month={statement_month}")
 
-    # Strategy 1: structured table extraction
-    records = extract_with_pdfplumber(pdf_path, bank, statement_month)
+    parse_started = time.perf_counter()
+    strategy1_seconds = 0.0
+    strategy2_seconds = 0.0
+    llm_seconds = 0.0
+    records: list[dict] = []
     stats: dict = {}
+    llm_stats: dict = {}
+    llm_page_outputs: list[dict] = []
+
+    # Strategy 1: structured table extraction
+    strategy_started = time.perf_counter()
+    records = extract_with_pdfplumber(pdf_path, bank, statement_month)
+    strategy1_seconds = time.perf_counter() - strategy_started
 
     # Strategy 2: text regex (check register layout)
     if not records:
-        logger.info(f"    Strategy 1 (tables): 0 rows — trying text regex")
+        logger.info("    Strategy 1 (tables): 0 rows — trying text regex")
+        strategy_started = time.perf_counter()
         records, stats = extract_with_text_regex(pdf_path, bank, statement_month)
+        strategy2_seconds = time.perf_counter() - strategy_started
         logger.info(
             f"    Pages scanned:          {stats.get('pages_scanned', '?')}\n"
             f"    Check-register pages:   {stats.get('check_register_pages', '?')}\n"
@@ -469,70 +516,160 @@ def parse_bank_pdf(
     else:
         logger.info(f"    Strategy 1 (tables): {len(records)} rows")
 
-    # ── Strategy 3: LLM fallback for scanned check-image pages ───────────────
-    # Runs after regex; enriches existing rows with vendor names and adds any
-    # checks found in scanned pages that the register did not list.
-    llm_stats: dict = {}
+    # Strategy 3: LLM page extraction (raw page outputs only).
     try:
-        from src.ingest.llm_pdf_fallback import extract_llm_fallback_rows
+        from src.ingest.llm_pdf_fallback import extract_llm_fallback_page_outputs
         page_month_map = stats.get("page_month_map", {})
-        llm_new_rows, llm_stats = extract_llm_fallback_rows(
-            pdf_path            = pdf_path,
-            bank                = bank,
-            statement_month_fallback = statement_month,
-            existing_rows       = records,   # mutated in-place: descriptions filled
-            page_month_map      = page_month_map,
-            row_counter_start   = len(records),
+        llm_started = time.perf_counter()
+        llm_page_outputs, llm_stats = extract_llm_fallback_page_outputs(
+            pdf_path=pdf_path,
+            statement_month_fallback=statement_month,
+            page_month_map=page_month_map,
+            llm_page_workers=llm_page_workers,
+            llm_max_retries=llm_page_max_retries,
+            llm_retry_base_seconds=llm_page_retry_base_seconds,
         )
-        records = records + llm_new_rows
+        llm_seconds = time.perf_counter() - llm_started
         logger.info(
-            f"    LLM fallback — pages: {llm_stats.get('pages_processed', 0)}, "
-            f"vendor enriched: {llm_stats.get('vendor_matches', 0)}, "
-            f"new records: {llm_stats.get('new_records', 0)}"
+            f"    LLM fallback raw pages: {llm_stats.get('pages_processed', 0)} "
+            f"(rows_extracted={llm_stats.get('rows_extracted', 0)})"
         )
     except ImportError:
         logger.debug("    LLM fallback module not available — skipping")
-    except Exception as e:
-        logger.warning(f"    LLM fallback raised an error — skipping: {e}")
+    except Exception as exc:
+        logger.warning(f"    LLM fallback raised an error — skipping: {exc}")
 
-    if not records:
-        logger.warning(
-            f"    All extraction strategies found no transactions in {pdf_path.name}."
-        )
-        empty_df = pd.DataFrame(
-            columns=["bank_id", "posted_date", "check_no", "amount", "description", "statement_month"]
-        )
-        if return_meta:
-            return empty_df, {
-                "filename": pdf_path.name,
-                "bank": bank,
-                "statement_month": statement_month,
-                "rows_extracted": 0,
-                "strategy": "none",
-                "regex_stats": stats,
-                "llm_stats": llm_stats,
-            }
-        return empty_df
+    parse_only_seconds = time.perf_counter() - parse_started
+    base_strategy = "tables" if stats == {} else "regex_plus_llm"
 
-    df = pd.DataFrame(records)
-    # Keep canonical columns; extra columns (e.g. source) are preserved as-is
-    core_cols = ["bank_id", "posted_date", "check_no", "amount", "description", "statement_month"]
-    extra_cols = [c for c in df.columns if c not in core_cols]
-    df = df[core_cols + extra_cols]
-    logger.info(
-        f"  Extracted {len(df)} transactions "
-        f"(regex: {len(df) - llm_stats.get('new_records', 0)}, "
-        f"llm_new: {llm_stats.get('new_records', 0)})"
-    )
-    meta = {
+    return {
         "filename": pdf_path.name,
         "bank": bank,
         "statement_month": statement_month,
-        "rows_extracted": len(df),
-        "strategy": "tables" if stats == {} else "regex_plus_llm",
+        "base_records": records,
+        "strategy": base_strategy,
         "regex_stats": stats,
         "llm_stats": llm_stats,
+        "llm_page_outputs": llm_page_outputs,
+        "timing": {
+            "strategy1_seconds": round(strategy1_seconds, 3),
+            "strategy2_seconds": round(strategy2_seconds, 3),
+            "llm_seconds": round(llm_seconds, 3),
+            "parse_only_seconds": round(parse_only_seconds, 3),
+        },
     }
+
+
+def _finalize_pdf_payload(raw_payload: dict) -> tuple[pd.DataFrame, dict]:
+    """
+    Deterministically merge raw LLM page outputs into base rows in parent process.
+    """
+    from src.ingest.llm_pdf_fallback import merge_llm_page_outputs
+
+    filename = str(raw_payload.get("filename", "unknown.pdf"))
+    bank = str(raw_payload.get("bank", "UNKNOWN"))
+    statement_month = str(raw_payload.get("statement_month", "UNKNOWN"))
+    base_records = [dict(r) for r in (raw_payload.get("base_records", []) or [])]
+    llm_page_outputs = raw_payload.get("llm_page_outputs", []) or []
+    regex_stats = raw_payload.get("regex_stats", {}) or {}
+    llm_stats_raw = raw_payload.get("llm_stats", {}) or {}
+    timing = raw_payload.get("timing", {}) or {}
+    merge_started = time.perf_counter()
+    llm_new_rows, merge_stats = merge_llm_page_outputs(
+        pdf_filename=filename,
+        bank=bank,
+        existing_rows=base_records,
+        page_outputs=llm_page_outputs,
+        row_counter_start=len(base_records),
+    )
+    merge_seconds = time.perf_counter() - merge_started
+
+    llm_stats = {
+        **llm_stats_raw,
+        **merge_stats,
+    }
+    records = base_records + llm_new_rows
+
+    if not records:
+        logger.warning(f"    All extraction strategies found no transactions in {filename}.")
+        total_seconds = float(timing.get("parse_only_seconds", 0.0) or 0.0) + merge_seconds
+        empty_df = pd.DataFrame(
+            columns=["bank_id", "posted_date", "check_no", "amount", "description", "statement_month"]
+        )
+        meta = {
+            "filename": filename,
+            "bank": bank,
+            "statement_month": statement_month,
+            "rows_extracted": 0,
+            "strategy": "none",
+            "regex_stats": regex_stats,
+            "llm_stats": llm_stats,
+            "parse_seconds": round(total_seconds, 3),
+            "timing": {
+                "strategy1_seconds": float(timing.get("strategy1_seconds", 0.0) or 0.0),
+                "strategy2_seconds": float(timing.get("strategy2_seconds", 0.0) or 0.0),
+                "llm_seconds": float(timing.get("llm_seconds", 0.0) or 0.0),
+                "merge_seconds": round(merge_seconds, 3),
+                "total_seconds": round(total_seconds, 3),
+            },
+        }
+        return empty_df, meta
+
+    df = pd.DataFrame(records)
+    core_cols = ["bank_id", "posted_date", "check_no", "amount", "description", "statement_month"]
+    extra_cols = [c for c in df.columns if c not in core_cols]
+    df = df[core_cols + extra_cols]
+
+    llm_new = int(llm_stats.get("new_records", 0) or 0)
+    logger.info(
+        f"  Extracted {len(df)} transactions "
+        f"(regex: {len(df) - llm_new}, llm_new: {llm_new})"
+    )
+
+    total_seconds = float(timing.get("parse_only_seconds", 0.0) or 0.0) + merge_seconds
+    strategy = str(raw_payload.get("strategy", "regex_plus_llm"))
+    meta = {
+        "filename": filename,
+        "bank": bank,
+        "statement_month": statement_month,
+        "rows_extracted": len(df),
+        "strategy": strategy,
+        "regex_stats": regex_stats,
+        "llm_stats": llm_stats,
+        "parse_seconds": round(total_seconds, 3),
+        "timing": {
+            "strategy1_seconds": float(timing.get("strategy1_seconds", 0.0) or 0.0),
+            "strategy2_seconds": float(timing.get("strategy2_seconds", 0.0) or 0.0),
+            "llm_seconds": float(timing.get("llm_seconds", 0.0) or 0.0),
+            "merge_seconds": round(merge_seconds, 3),
+            "total_seconds": round(total_seconds, 3),
+        },
+    }
+    return df, meta
+
+
+def parse_bank_pdf(
+    pdf_path: Path,
+    return_meta: bool = False,
+    llm_page_workers: int = LLM_PAGE_WORKERS,
+    llm_page_max_retries: int = LLM_PAGE_MAX_RETRIES,
+    llm_page_retry_base_seconds: float = LLM_PAGE_RETRY_BASE_SECONDS,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
+    """
+    Parse a single bank statement PDF → normalized DataFrame.
+
+    Extraction strategy (in order):
+      1. pdfplumber table extraction (works for digitally-generated PDFs)
+      2. pdfplumber text + regex (works for Northern Trust check register layout)
+      3. LLM fallback for scanned check-face pages
+    """
+    raw_payload = _parse_bank_pdf_raw_payload(
+        pdf_path=pdf_path,
+        llm_page_workers=llm_page_workers,
+        llm_page_max_retries=llm_page_max_retries,
+        llm_page_retry_base_seconds=llm_page_retry_base_seconds,
+    )
+    df, meta = _finalize_pdf_payload(raw_payload)
     if return_meta:
         return df, meta
     return df
@@ -544,6 +681,10 @@ def run(
     bank_raw_dir: Path | None = None,
     interim_dir: Path | None = None,
     return_metadata: bool = False,
+    workers: int | None = None,
+    llm_page_workers: int = LLM_PAGE_WORKERS,
+    llm_page_max_retries: int = LLM_PAGE_MAX_RETRIES,
+    llm_page_retry_base_seconds: float = LLM_PAGE_RETRY_BASE_SECONDS,
 ) -> dict[str, pd.DataFrame] | tuple[dict[str, pd.DataFrame], dict]:
     """
     Parse all PDFs in data/bank_raw/.
@@ -560,15 +701,97 @@ def run(
         logger.warning(f"No PDF files found in {bank_raw_dir}")
         empty: dict[str, pd.DataFrame] = {}
         if return_metadata:
-            return empty, {"files": [], "total_files": 0}
+            return empty, {"files": [], "total_files": 0, "timing": {"total_seconds": 0.0}}
         return empty
+
+    parse_started = time.perf_counter()
+    configured_workers = workers if workers is not None else BANK_PARSE_WORKERS
+    effective_workers = max(1, min(int(configured_workers), len(pdfs)))
+
+    logger.info(
+        f"Bank parse starting: files={len(pdfs)}, "
+        f"pdf_workers={effective_workers}, llm_page_workers={llm_page_workers}"
+    )
 
     bank_frames: dict[str, list[pd.DataFrame]] = {}
     parse_meta: list[dict] = []
+    raw_by_pdf: dict[str, dict] = {}
+
+    if effective_workers <= 1 or len(pdfs) <= 1:
+        for pdf_path in pdfs:
+            raw_payload = _parse_bank_pdf_raw_payload(
+                pdf_path=pdf_path,
+                llm_page_workers=llm_page_workers,
+                llm_page_max_retries=llm_page_max_retries,
+                llm_page_retry_base_seconds=llm_page_retry_base_seconds,
+            )
+            raw_by_pdf[str(pdf_path)] = raw_payload
+    else:
+        try:
+            with ProcessPoolExecutor(max_workers=effective_workers) as pool:
+                future_to_pdf = {
+                    pool.submit(
+                        _parse_pdf_worker,
+                        str(pdf_path),
+                        llm_page_workers,
+                        llm_page_max_retries,
+                        llm_page_retry_base_seconds,
+                    ): pdf_path
+                    for pdf_path in pdfs
+                }
+                for fut in as_completed(future_to_pdf):
+                    pdf_path = future_to_pdf[fut]
+                    try:
+                        pdf_path_str, raw_payload = fut.result()
+                        raw_by_pdf[pdf_path_str] = raw_payload
+                    except Exception as exc:
+                        logger.warning(
+                            f"Parallel worker failed for {pdf_path.name}; "
+                            f"retrying once in-process: {exc}"
+                        )
+                        try:
+                            raw_payload = _parse_bank_pdf_raw_payload(
+                                pdf_path=pdf_path,
+                                llm_page_workers=llm_page_workers,
+                                llm_page_max_retries=llm_page_max_retries,
+                                llm_page_retry_base_seconds=llm_page_retry_base_seconds,
+                            )
+                            raw_payload["worker_retry"] = True
+                            raw_by_pdf[str(pdf_path)] = raw_payload
+                        except Exception as retry_exc:
+                            raise RuntimeError(
+                                f"Failed to parse {pdf_path.name} after retry"
+                            ) from retry_exc
+        except Exception as pool_exc:
+            logger.warning(
+                f"Parallel parse pool unavailable ({pool_exc}); "
+                "falling back to sequential parsing"
+            )
+            for pdf_path in pdfs:
+                key = str(pdf_path)
+                if key in raw_by_pdf:
+                    continue
+                raw_payload = _parse_bank_pdf_raw_payload(
+                    pdf_path=pdf_path,
+                    llm_page_workers=llm_page_workers,
+                    llm_page_max_retries=llm_page_max_retries,
+                    llm_page_retry_base_seconds=llm_page_retry_base_seconds,
+                )
+                raw_payload["parallel_fallback"] = True
+                raw_by_pdf[key] = raw_payload
+
+    # Collate in deterministic PDF filename order.
     for pdf_path in pdfs:
-        bank, _ = parse_filename(pdf_path)
-        parsed = parse_bank_pdf(pdf_path, return_meta=True)
-        df, meta = parsed
+        key = str(pdf_path)
+        if key not in raw_by_pdf:
+            raise RuntimeError(f"Missing parse result for {pdf_path.name}")
+        raw_payload = raw_by_pdf[key]
+        df, meta = _finalize_pdf_payload(raw_payload)
+        if raw_payload.get("worker_retry"):
+            meta["worker_retry"] = True
+        if raw_payload.get("parallel_fallback"):
+            meta["parallel_fallback"] = True
+        bank = str(meta.get("bank", "UNKNOWN"))
         parse_meta.append(meta)
         if not df.empty:
             bank_frames.setdefault(bank, []).append(df)
@@ -576,17 +799,29 @@ def run(
     result: dict[str, pd.DataFrame] = {}
     for bank, dfs in bank_frames.items():
         combined = pd.concat(dfs, ignore_index=True)
-        combined = combined.sort_values("posted_date").reset_index(drop=True)
+        combined = _sort_bank_frame(combined)
         output_path = interim_dir / f"bank_{bank}.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         combined.to_csv(output_path, index=False)
         logger.info(f"Saved {len(combined)} transactions → {output_path}")
         result[bank] = combined
 
+    total_seconds = time.perf_counter() - parse_started
+    logger.info(
+        f"Bank parse complete: files={len(parse_meta)}, banks={len(result)}, "
+        f"total_seconds={total_seconds:.2f}"
+    )
+
     if return_metadata:
         return result, {
             "files": parse_meta,
             "total_files": len(parse_meta),
+            "timing": {
+                "total_seconds": round(total_seconds, 3),
+                "pdf_workers": effective_workers,
+                "llm_page_workers": llm_page_workers,
+                "llm_page_max_retries": llm_page_max_retries,
+            },
         }
     return result
 

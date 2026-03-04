@@ -1,0 +1,152 @@
+{
+  "bench_root": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245",
+  "results": [
+    {
+      "workers_requested": 1,
+      "workers_effective": 1,
+      "ok": true,
+      "error": null,
+      "run_dir": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245/w1",
+      "metrics_dir": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245/metrics_w1",
+      "total_runtime_s": 820.328556542,
+      "stage_times_s": {
+        "parse_pid_s": 0.38593416599999997,
+        "pdf_parsing_s": 603.405949041,
+        "harmonize_s": 0.26998650000007274,
+        "canonicalize_s": 5.709366749999958,
+        "matching_s": 209.96603649999997,
+        "report_s": 0.12570141599996987,
+        "packet_generation_s": 0.46557708399996045
+      },
+      "pdf_parsing_s": 603.405949041,
+      "ocr_s": 27.483752703000008,
+      "llm_fallback_s": 577.721,
+      "matching_s": 209.96603649999997,
+      "packet_generation_s": 0.46557708399996045,
+      "packet_count": 170,
+      "llm_pages_processed": 270,
+      "llm_pages_failed": 0,
+      "llm_retries_used": 0,
+      "llm_cache_hits": 0,
+      "llm_cache_misses": 270,
+      "llm_cache_writes": 270,
+      "llm_calls_total": 274,
+      "llm_calls_fallback": 270,
+      "llm_calls_vendor": 4,
+      "avg_llm_latency_s": 7.477162313405115,
+      "pages_per_second": 0.44745995698105745,
+      "rows_extracted_per_second": 2.0732311340122327,
+      "rows_extracted_total": 1251,
+      "bank_csv_artifacts": {
+        "bank_FLAG.csv": {
+          "rows": 1251,
+          "sha256": "897e4e8251b13c1ba994d969d53f9e4f9d18f611b1afe32ee6bbe2d513cdbf6d"
+        }
+      },
+      "wrapper_elapsed_s": 821.259173125,
+      "artifact_parity_vs_w1": {
+        "identical": true,
+        "diffs": []
+      },
+      "speedup_vs_w1": 1.0
+    },
+    {
+      "workers_requested": 2,
+      "workers_effective": 2,
+      "ok": true,
+      "error": null,
+      "run_dir": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245/w2",
+      "metrics_dir": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245/metrics_w2",
+      "total_runtime_s": 263.600733917,
+      "stage_times_s": {
+        "parse_pid_s": 0.356063958,
+        "pdf_parsing_s": 50.899705125000004,
+        "harmonize_s": 0.2552559169999995,
+        "canonicalize_s": 5.864386416999999,
+        "matching_s": 205.293953166,
+        "report_s": 0.18802916699996786,
+        "packet_generation_s": 0.7433342500000322
+      },
+      "pdf_parsing_s": 50.899705125000004,
+      "ocr_s": 27.620566630999992,
+      "llm_fallback_s": 50.348,
+      "matching_s": 205.293953166,
+      "packet_generation_s": 0.7433342500000322,
+      "packet_count": 170,
+      "llm_pages_processed": 270,
+      "llm_pages_failed": 0,
+      "llm_retries_used": 0,
+      "llm_cache_hits": 270,
+      "llm_cache_misses": 0,
+      "llm_cache_writes": 0,
+      "llm_calls_total": 4,
+      "llm_calls_fallback": 0,
+      "llm_calls_vendor": 4,
+      "avg_llm_latency_s": 1.4642148647500015,
+      "pages_per_second": 5.304549394479424,
+      "rows_extracted_per_second": 24.577745527754665,
+      "rows_extracted_total": 1251,
+      "bank_csv_artifacts": {
+        "bank_FLAG.csv": {
+          "rows": 1251,
+          "sha256": "897e4e8251b13c1ba994d969d53f9e4f9d18f611b1afe32ee6bbe2d513cdbf6d"
+        }
+      },
+      "wrapper_elapsed_s": 264.17679491699994,
+      "artifact_parity_vs_w1": {
+        "identical": true,
+        "diffs": []
+      },
+      "speedup_vs_w1": 3.1120116562357407
+    },
+    {
+      "workers_requested": 4,
+      "workers_effective": 3,
+      "ok": true,
+      "error": null,
+      "run_dir": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245/w4",
+      "metrics_dir": "/tmp/invoice_perf_bench_with_llm_cache_20260304_131245/metrics_w4",
+      "total_runtime_s": 309.414002291,
+      "stage_times_s": {
+        "parse_pid_s": 0.786278291,
+        "pdf_parsing_s": 76.105221125,
+        "harmonize_s": 1.011940832999997,
+        "canonicalize_s": 5.045995916999999,
+        "matching_s": 225.856618459,
+        "report_s": 0.1282413330000054,
+        "packet_generation_s": 0.47969337500001075
+      },
+      "pdf_parsing_s": 76.105221125,
+      "ocr_s": 48.38997824499995,
+      "llm_fallback_s": 84.28200000000001,
+      "matching_s": 225.856618459,
+      "packet_generation_s": 0.47969337500001075,
+      "packet_count": 170,
+      "llm_pages_processed": 270,
+      "llm_pages_failed": 0,
+      "llm_retries_used": 0,
+      "llm_cache_hits": 270,
+      "llm_cache_misses": 0,
+      "llm_cache_writes": 0,
+      "llm_calls_total": 4,
+      "llm_calls_fallback": 0,
+      "llm_calls_vendor": 4,
+      "avg_llm_latency_s": 1.2584880727499979,
+      "pages_per_second": 3.547719801727335,
+      "rows_extracted_per_second": 16.437768414669986,
+      "rows_extracted_total": 1251,
+      "bank_csv_artifacts": {
+        "bank_FLAG.csv": {
+          "rows": 1251,
+          "sha256": "897e4e8251b13c1ba994d969d53f9e4f9d18f611b1afe32ee6bbe2d513cdbf6d"
+        }
+      },
+      "wrapper_elapsed_s": 310.1096667500001,
+      "artifact_parity_vs_w1": {
+        "identical": true,
+        "diffs": []
+      },
+      "speedup_vs_w1": 2.651232815800273
+    }
+  ]
+}
